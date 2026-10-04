@@ -45,6 +45,7 @@
                 <tr>
                   <th>编码</th><th>名称</th><th>类型</th><th>状态</th>
                   <th class="num">探头数</th><th class="num">批次数</th><th class="num">在办批次数</th>
+                  <th class="num">可放行</th><th class="num">被挡下</th>
                 </tr>
               </thead>
               <tbody id="overviewRows"></tbody>
@@ -83,7 +84,7 @@
               <thead>
                 <tr>
                   <th>编号</th><th>所属冷库</th><th>位置</th><th>状态</th><th>校准有效期</th>
-                  <th class="num">记录条数</th><th class="num">人工条数</th><th>是否已过期</th><th>操作</th>
+                  <th class="num">记录条数</th><th class="num">人工条数</th><th class="num">涉及批次</th><th>是否已过期</th><th>操作</th>
                 </tr>
               </thead>
               <tbody id="probeRows"></tbody>
@@ -103,7 +104,7 @@
               <thead>
                 <tr>
                   <th>批次号</th><th>品名</th><th>规格</th><th class="num">件数</th><th>所在冷库</th>
-                  <th>入库时刻</th><th>状态</th><th class="num">记录数</th><th class="num">最长超限</th>
+                  <th>冷库状态</th><th>入库时刻</th><th>状态</th><th class="num">记录数</th><th class="num">最长超限</th>
                   <th class="num">累计超限</th><th class="num">MKT</th><th class="num">断链数</th><th>放行情况</th>
                 </tr>
               </thead>
@@ -125,7 +126,7 @@
               <thead>
                 <tr>
                   <th>批次</th><th>探头</th><th>时刻</th><th class="num">温度(℃)</th><th>来源</th>
-                  <th>登记人</th><th>是否超限</th><th>操作</th>
+                  <th>登记人</th><th>是否超限</th><th>参与判定</th><th>操作</th>
                 </tr>
               </thead>
               <tbody id="recordRows"></tbody>

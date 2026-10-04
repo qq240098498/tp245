@@ -320,3 +320,46 @@ tr.row-detail > td { background: #f7fbfc; border-bottom: 1px solid var(--line); 
   .layout { flex-direction: column; }
   .filters { width: 100%; flex: 1 1 auto; position: static; }
 }
+
+/* ---------- 状态影响与重算对照 ---------- */
+
+:root {
+  --warn: #b7791f;
+  --warn-soft: #fdf3e0;
+}
+
+.row-warn td { background: var(--warn-soft); }
+.row-warn:hover td { background: #faeccf; }
+
+.pill-warn { color: var(--warn); border-color: #ecd29a; background: var(--warn-soft); }
+
+.cell-hint { color: var(--ink-soft); font-size: 11px; white-space: normal; }
+.block-hint { color: var(--ink-soft); font-size: 11px; font-weight: normal; margin-left: 8px; }
+
+.status-note {
+  margin: 6px 8px 2px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  background: var(--warn-soft);
+  border-radius: 0 4px 4px 0;
+}
+
+.exclude-note {
+  color: var(--accent);
+  font-size: 12px;
+  margin: 4px 0 6px;
+}
+
+.impact-head {
+  font-weight: bold;
+  margin-bottom: 8px;
+  line-height: 1.6;
+}
+.impact-summary {
+  background: var(--primary-soft);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.impact-table { max-height: 320px; overflow: auto; margin-bottom: 8px; }
+.impact-table table { min-width: 760px; }

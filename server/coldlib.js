@@ -16,9 +16,35 @@ function probeOf(data, probeId) {
   return data.probes.find((p) => p.id === probeId) || null;
 }
 
-// 同一探头同一时刻既有自动记录又有手工更正时，以手工为准
+function roomOf(data, roomId) {
+  return data.rooms.find((r) => r.id === roomId) || null;
+}
+
+// 探头是否处于可参与判定的状态：只有「在用」参与；停用、送检都不参与
+function probeParticipates(probe) {
+  return !!probe && probe.status === '在用';
+}
+
+// 一个批次名下被排除在判定之外的记录（台账仍保留、可查）
+// 原因：探头停用/送检，或探头已不在台账上
+function excludedRecords(data, batchId) {
+  return recordsOfBatch(data, batchId).map((row) => {
+    const probe = probeOf(data, row.probeId);
+    if (probeParticipates(probe)) return null;
+    return {
+      id: row.id,
+      probeId: row.probeId,
+      probeCode: probe ? probe.code : '',
+      probeStatus: probe ? probe.status : '已删除',
+      reason: probe ? '探头状态为「' + probe.status + '」，名下记录不参与判定' : '探头已不在台账，记录不参与判定',
+    };
+  }).filter(Boolean);
+}
+
+// 同一探头同一时刻既有自动记录又有手工更正时，以手工为准；
+// 停用/送检探头名下的记录一律不进判定（记录本身仍在 records 里可查）
 function effectiveRecords(data, batchId) {
-  const rows = recordsOfBatch(data, batchId);
+  const rows = recordsOfBatch(data, batchId).filter((row) => probeParticipates(probeOf(data, row.probeId)));
   const picked = {};
   const order = [];
   for (const row of rows) {
@@ -28,8 +54,8 @@ function effectiveRecords(data, batchId) {
       order.push(key);
       continue;
     }
-    const current = picked[key];
-    if (current.source === '人工' && row.source === '自动') picked[key] = row;
+    // 后到的手工更正记录覆盖自动记录
+    if (row.source === '人工') picked[key] = row;
   }
   return order.map((key) => picked[key]);
 }
@@ -117,6 +143,33 @@ function expiredProbes(data, batchId, day) {
   return bad;
 }
 
+// 被排除探头的汇总：判定条目里要写明因为哪台探头剔掉了几条记录
+function excludedProbeSummary(data, batchId) {
+  const map = {};
+  const order = [];
+  for (const row of recordsOfBatch(data, batchId)) {
+    const probe = probeOf(data, row.probeId);
+    if (probeParticipates(probe)) continue;
+    if (!map[row.probeId]) {
+      map[row.probeId] = {
+        probeId: row.probeId,
+        probeCode: probe ? probe.code : '',
+        probeStatus: probe ? probe.status : '已删除',
+        reason: probe ? '探头「' + probe.code + '」状态为「' + probe.status + '」' : '探头已不在台账',
+        count: 0,
+        firstAt: row.at,
+        lastAt: row.at,
+      };
+      order.push(row.probeId);
+    }
+    const item = map[row.probeId];
+    item.count += 1;
+    if (row.at < item.firstAt) item.firstAt = row.at;
+    if (row.at > item.lastAt) item.lastAt = row.at;
+  }
+  return order.map((id) => map[id]);
+}
+
 // 累计超限时长：按批次周期累计，跨月不重置
 function accumulatedExcursionMinutes(data, batchId) {
   return excursionStats(data, batchId).totalMinutes;
@@ -130,44 +183,100 @@ function monthlyExcursionMinutes(data, batchId) {
   return segmentStats(scoped, data.settings).totalMinutes;
 }
 
-// 放行判定：最长超限、累计超限、断链、探头校准四条
+// 放行判定：有记录、最长超限、累计超限、断链、探头校准五条；
+// 停用/送检探头名下记录已在 effectiveRecords 阶段剔除，并在 excludedProbes 里点名
 function releaseCheck(data, batch) {
   const settings = data.settings;
   const stats = excursionStats(data, batch.id);
   const chain = chainGaps(data, batch.id);
   const accumulated = monthlyExcursionMinutes(data, batch.id);
   const expired = expiredProbes(data, batch.id, batch.loadedAt ? String(batch.loadedAt).slice(0, 10) : '');
+  const excluded = excludedProbeSummary(data, batch.id);
+  const room = roomOf(data, batch.roomId);
   const conditions = [
+    { key: 'records', ok: stats.recordCount > 0, value: stats.recordCount, limit: 1, text: '至少有一条参与判定的温度记录（没有任何温度记录的批次不能放行）' },
     { key: 'longest', ok: stats.longestMinutes <= Number(settings.allowExcursionMinutes), value: stats.longestMinutes, limit: Number(settings.allowExcursionMinutes), text: '单次连续超限不超过 ' + settings.allowExcursionMinutes + ' 分钟' },
     { key: 'total', ok: accumulated <= Number(settings.allowTotalExcursionMinutes), value: accumulated, limit: Number(settings.allowTotalExcursionMinutes), text: '累计超限不超过 ' + settings.allowTotalExcursionMinutes + ' 分钟' },
     { key: 'chain', ok: chain.gapCount === 0, value: chain.gapCount, limit: 0, text: '全程没有断链' },
+    { key: 'calibration', ok: expired.length === 0, value: expired.length, limit: 0, text: '参与判定的探头都在校准有效期内' },
   ];
   return {
     mkt: mktCelsius(data, batch.id),
     longestMinutes: stats.longestMinutes,
     totalMinutes: stats.totalMinutes,
     recordCount: stats.recordCount,
+    totalRecordCount: recordsOfBatch(data, batch.id).length,
     firstAt: stats.firstAt,
     lastAt: stats.lastAt,
     chain,
     expiredProbes: expired,
+    excludedProbes: excluded,
+    excludedRecordCount: excluded.reduce((acc, p) => acc + p.count, 0),
     conditions,
     pass: conditions.every((c) => c.ok),
     failed: conditions.filter((c) => !c.ok).map((c) => c.key),
+    roomId: batch.roomId,
+    roomCode: room ? room.code : '',
+    roomStatus: room ? room.status : '',
+    roomRunning: !!room && room.status === '运行',
   };
+}
+
+// 判定快照里用于前后对照的关键字段
+function checkSignature(check) {
+  return {
+    pass: !!check.pass,
+    failed: (check.failed || []).slice(),
+    mkt: check.mkt,
+    longestMinutes: check.longestMinutes,
+    totalMinutes: check.totalMinutes,
+    recordCount: check.recordCount,
+    chainGapCount: check.chain ? check.chain.gapCount : 0,
+    expiredProbeCodes: (check.expiredProbes || []).map((p) => p.probeCode),
+    excludedProbes: (check.excludedProbes || []).map((p) => p.probeCode + '×' + p.count),
+  };
+}
+
+// 同一批次前后两次判定的对照（结论是否变化、哪几条翻转）
+function compareCheck(before, after) {
+  const a = checkSignature(before);
+  const b = checkSignature(after);
+  const changed = a.pass !== b.pass
+    || JSON.stringify(a.failed) !== JSON.stringify(b.failed)
+    || a.mkt !== b.mkt
+    || a.longestMinutes !== b.longestMinutes
+    || a.totalMinutes !== b.totalMinutes
+    || a.recordCount !== b.recordCount
+    || a.chainGapCount !== b.chainGapCount
+    || JSON.stringify(a.expiredProbeCodes) !== JSON.stringify(b.expiredProbeCodes)
+    || JSON.stringify(a.excludedProbes) !== JSON.stringify(b.excludedProbes);
+  const failedSet = new Set(a.failed.concat(b.failed));
+  const flipped = [];
+  failedSet.forEach((key) => {
+    const wasFailing = a.failed.includes(key);
+    const nowFailing = b.failed.includes(key);
+    if (wasFailing !== nowFailing) flipped.push({ key, wasFailing, nowFailing });
+  });
+  return { changed, conclusionChanged: a.pass !== b.pass, flipped, before: a, after: b };
 }
 
 module.exports = {
   toDate,
   probeOf,
+  roomOf,
+  probeParticipates,
   recordsOfBatch,
+  excludedRecords,
   effectiveRecords,
   excursionStats,
   chainGaps,
   mktCelsius,
   probeValidOn,
   expiredProbes,
+  excludedProbeSummary,
   accumulatedExcursionMinutes,
   monthlyExcursionMinutes,
   releaseCheck,
+  checkSignature,
+  compareCheck,
 };

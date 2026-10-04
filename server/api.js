@@ -22,39 +22,77 @@ function withData(handler) {
 
 function overview(data) {
   const settings = data.settings;
-  const batches = data.batches.map((b) => res.listBatches.length ? Object.assign({}, b) : b);
+  const roomById = {};
+  data.rooms.forEach((r) => { roomById[r.id] = r; });
   const decorated = data.batches.map((b) => {
     const detail = coldlib.releaseCheck(data, b);
-    return { batch: b, check: detail };
+    return { batch: b, check: detail, room: roomById[b.roomId] || null };
   });
   const statusCount = {};
   for (const b of data.batches) statusCount[b.status] = (statusCount[b.status] || 0) + 1;
-  const open = data.batches.filter((b) => b.status === '在库' || b.status === '待放行');
-  const readyToRelease = decorated.filter((d) => (d.batch.status === '在库' || d.batch.status === '待放行') && d.check.pass).length;
-  const blockedCount = decorated.filter((d) => (d.batch.status === '在库' || d.batch.status === '待放行') && !d.check.pass).length;
-  const noRecordBatches = data.batches.filter((b) => !data.records.some((r) => r.batchId === b.id)).length;
+  const isOpen = (b) => b.status === '在库' || b.status === '待放行';
+  const openAll = decorated.filter((d) => isOpen(d.batch));
+
+  // 统计分口径：全部冷库 / 仅运行中冷库 / 检修与停用冷库。
+  // 检修与停用冷库的批次照常判定，但在运行口径里单独分出来，不混进在办与放行盘子
+  function scopeRows(rows, kind) {
+    if (kind === 'running') return rows.filter((d) => d.room && d.room.status === '运行');
+    if (kind === 'nonRunning') return rows.filter((d) => d.room && d.room.status !== '运行');
+    return rows;
+  }
+  function summarize(kind) {
+    const open = scopeRows(openAll, kind);
+    const pool = scopeRows(decorated, kind);
+    const mktValues = pool.map((d) => d.check.mkt).filter((v) => v > 0);
+    const noRecordBatches = pool.filter((d) => d.check.totalRecordCount === 0).length;
+    return {
+      openBatchCount: open.length,
+      readyToRelease: open.filter((d) => d.check.pass).length,
+      blockedCount: open.filter((d) => !d.check.pass).length,
+      noRecordBatches,
+      maxMkt: mktValues.length ? store.round(Math.max.apply(null, mktValues)) : 0,
+      averageMkt: mktValues.length ? store.round(mktValues.reduce((a, b) => a + b, 0) / mktValues.length) : 0,
+    };
+  }
+  const allScope = summarize('all');
+  const runningScope = summarize('running');
+  const nonRunningScope = summarize('nonRunning');
+
+  const openByRoomStatus = { 运行: 0, 检修: 0, 停用: 0 };
+  openAll.forEach((d) => {
+    const key = d.room ? d.room.status : '';
+    if (key in openByRoomStatus) openByRoomStatus[key] += 1;
+  });
   const expiredProbes = data.probes.filter((p) => !coldlib.probeValidOn(p, store.nowText().slice(0, 10))).length;
-  const mktValues = decorated.map((d) => d.check.mkt).filter((v) => v > 0);
   return {
     today: store.nowText().slice(0, 10),
     roomCount: data.rooms.length,
     runningRoomCount: data.rooms.filter((r) => r.status === '运行').length,
+    maintenanceRoomCount: data.rooms.filter((r) => r.status === '检修').length,
+    stoppedRoomCount: data.rooms.filter((r) => r.status === '停用').length,
     probeCount: data.probes.length,
     runningProbeCount: data.probes.filter((p) => p.status === '在用').length,
+    stoppedProbeCount: data.probes.filter((p) => p.status !== '在用').length,
     expiredProbeCount: expiredProbes,
     batchCount: data.batches.length,
     statusCount,
-    openBatchCount: open.length,
+    openBatchCount: allScope.openBatchCount,
+    openByRoomStatus,
     recordCount: data.records.length,
     manualRecordCount: data.records.filter((r) => r.source === '人工').length,
+    excludedRecordCount: data.records.filter((r) => {
+      const probe = coldlib.probeOf(data, r.probeId);
+      return !coldlib.probeParticipates(probe);
+    }).length,
     releaseCount: data.releases.length,
     releasedCount: data.releases.filter((r) => r.decision === '放行').length,
     rejectedCount: data.releases.filter((r) => r.decision === '拒收').length,
-    readyToRelease,
-    blockedCount,
-    noRecordBatches,
-    maxMkt: mktValues.length ? store.round(Math.max.apply(null, mktValues)) : 0,
-    averageMkt: mktValues.length ? store.round(mktValues.reduce((a, b) => a + b, 0) / mktValues.length) : 0,
+    readyToRelease: allScope.readyToRelease,
+    blockedCount: allScope.blockedCount,
+    noRecordBatches: allScope.noRecordBatches,
+    maxMkt: allScope.maxMkt,
+    averageMkt: allScope.averageMkt,
+    scope: { all: allScope, running: runningScope, nonRunning: nonRunningScope },
     settings: {
       lowerLimitC: Number(settings.lowerLimitC),
       upperLimitC: Number(settings.upperLimitC),
@@ -66,10 +104,16 @@ function overview(data) {
     rooms: data.rooms.map((r) => {
       const probes = data.probes.filter((p) => p.roomId === r.id);
       const batches = data.batches.filter((b) => b.roomId === r.id);
+      const openBatches = batches.filter(isOpen);
+      const openChecks = openBatches.map((b) => coldlib.releaseCheck(data, b));
       return {
         id: r.id, code: r.code, name: r.name, type: r.type, status: r.status,
-        probeCount: probes.length, batchCount: batches.length,
-        openBatchCount: batches.filter((b) => b.status === '在库' || b.status === '待放行').length,
+        probeCount: probes.length,
+        runningProbeCount: probes.filter((p) => p.status === '在用').length,
+        batchCount: batches.length,
+        openBatchCount: openBatches.length,
+        readyToRelease: openChecks.filter((c) => c.pass).length,
+        blockedCount: openChecks.filter((c) => !c.pass).length,
       };
     }),
   };
