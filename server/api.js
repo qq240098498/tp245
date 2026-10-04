@@ -22,36 +22,67 @@ function withData(handler) {
 
 function overview(data) {
   const settings = data.settings;
-  const batches = data.batches.map((b) => res.listBatches.length ? Object.assign({}, b) : b);
   const decorated = data.batches.map((b) => {
     const detail = coldlib.releaseCheck(data, b);
-    return { batch: b, check: detail };
+    const room = data.rooms.find((r) => r.id === b.roomId) || null;
+    return { batch: b, check: detail, roomStatus: room ? room.status : '' };
   });
   const statusCount = {};
   for (const b of data.batches) statusCount[b.status] = (statusCount[b.status] || 0) + 1;
-  const open = data.batches.filter((b) => b.status === '在库' || b.status === '待放行');
-  const readyToRelease = decorated.filter((d) => (d.batch.status === '在库' || d.batch.status === '待放行') && d.check.pass).length;
-  const blockedCount = decorated.filter((d) => (d.batch.status === '在库' || d.batch.status === '待放行') && !d.check.pass).length;
+  const isOpen = (b) => b.status === '在库' || b.status === '待放行';
+  const open = data.batches.filter(isOpen);
+
+  // 冷库状态口径：运行 / 检修 / 停用 分组，在办批次与放行口径都要能分出来
+  const roomStatusCount = { 运行: 0, 检修: 0, 停用: 0 };
+  for (const r of data.rooms) roomStatusCount[r.status] = (roomStatusCount[r.status] || 0) + 1;
+  const openByRoomStatus = { 运行: 0, 检修: 0, 停用: 0 };
+  for (const d of decorated) {
+    if (isOpen(d.batch)) openByRoomStatus[d.roomStatus] = (openByRoomStatus[d.roomStatus] || 0) + 1;
+  }
+  const openDecorated = decorated.filter((d) => isOpen(d.batch));
+  const readyAll = openDecorated.filter((d) => d.check.pass);
+  const blockedAll = openDecorated.filter((d) => !d.check.pass);
+  const readyRunning = readyAll.filter((d) => d.roomStatus === '运行');
+  const blockedRunning = blockedAll.filter((d) => d.roomStatus === '运行');
+  const readyInactive = readyAll.filter((d) => d.roomStatus === '检修' || d.roomStatus === '停用');
+  const blockedInactive = blockedAll.filter((d) => d.roomStatus === '检修' || d.roomStatus === '停用');
+
   const noRecordBatches = data.batches.filter((b) => !data.records.some((r) => r.batchId === b.id)).length;
   const expiredProbes = data.probes.filter((p) => !coldlib.probeValidOn(p, store.nowText().slice(0, 10))).length;
+  const disabledProbeCount = data.probes.filter((p) => p.status === '停用').length;
   const mktValues = decorated.map((d) => d.check.mkt).filter((v) => v > 0);
   return {
     today: store.nowText().slice(0, 10),
     roomCount: data.rooms.length,
     runningRoomCount: data.rooms.filter((r) => r.status === '运行').length,
+    maintenanceRoomCount: roomStatusCount['检修'] || 0,
+    stoppedRoomCount: roomStatusCount['停用'] || 0,
+    roomStatusCount,
     probeCount: data.probes.length,
     runningProbeCount: data.probes.filter((p) => p.status === '在用').length,
+    disabledProbeCount,
     expiredProbeCount: expiredProbes,
     batchCount: data.batches.length,
     statusCount,
     openBatchCount: open.length,
+    openBatchCountByRoomStatus: openByRoomStatus,
+    openBatchCountRunning: openByRoomStatus['运行'] || 0,
+    openBatchCountInactive: (openByRoomStatus['检修'] || 0) + (openByRoomStatus['停用'] || 0),
     recordCount: data.records.length,
     manualRecordCount: data.records.filter((r) => r.source === '人工').length,
+    excludedRecordCount: data.records.filter((r) => {
+      const p = data.probes.find((x) => x.id === r.probeId);
+      return p && p.status === '停用';
+    }).length,
     releaseCount: data.releases.length,
     releasedCount: data.releases.filter((r) => r.decision === '放行').length,
     rejectedCount: data.releases.filter((r) => r.decision === '拒收').length,
-    readyToRelease,
-    blockedCount,
+    readyToRelease: readyAll.length,
+    blockedCount: blockedAll.length,
+    readyToReleaseRunning: readyRunning.length,
+    blockedCountRunning: blockedRunning.length,
+    readyToReleaseInactive: readyInactive.length,
+    blockedCountInactive: blockedInactive.length,
     noRecordBatches,
     maxMkt: mktValues.length ? store.round(Math.max.apply(null, mktValues)) : 0,
     averageMkt: mktValues.length ? store.round(mktValues.reduce((a, b) => a + b, 0) / mktValues.length) : 0,
@@ -68,8 +99,11 @@ function overview(data) {
       const batches = data.batches.filter((b) => b.roomId === r.id);
       return {
         id: r.id, code: r.code, name: r.name, type: r.type, status: r.status,
-        probeCount: probes.length, batchCount: batches.length,
-        openBatchCount: batches.filter((b) => b.status === '在库' || b.status === '待放行').length,
+        probeCount: probes.length,
+        runningProbeCount: probes.filter((p) => p.status === '在用').length,
+        disabledProbeCount: probes.filter((p) => p.status === '停用').length,
+        batchCount: batches.length,
+        openBatchCount: batches.filter(isOpen).length,
       };
     }),
   };

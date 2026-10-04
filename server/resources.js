@@ -34,10 +34,13 @@ function decorateRoom(data, room) {
 
 function decorateProbe(data, probe) {
   const records = data.records.filter((r) => r.probeId === probe.id);
+  const batchIds = {};
+  for (const r of records) batchIds[r.batchId] = true;
   return Object.assign({}, probe, {
     roomCode: roomCode(data, probe.roomId),
     recordCount: records.length,
     manualCount: records.filter((r) => r.source === '人工').length,
+    affectedBatchCount: Object.keys(batchIds).length,
     expired: !coldlib.probeValidOn(probe, store.nowText().slice(0, 10)),
   });
 }
@@ -46,9 +49,14 @@ function decorateBatch(data, batch) {
   const stats = coldlib.excursionStats(data, batch.id);
   const check = coldlib.releaseCheck(data, batch);
   const releases = data.releases.filter((r) => r.batchId === batch.id);
+  const room = data.rooms.find((r) => r.id === batch.roomId) || null;
   return Object.assign({}, batch, {
     roomCode: roomCode(data, batch.roomId),
+    roomStatus: room ? room.status : '',
     recordCount: stats.recordCount,
+    rawRecordCount: check.rawRecordCount,
+    excludedRecordCount: check.excludedRecordCount,
+    excludedProbes: check.excludedProbes,
     longestExcursionMinutes: stats.longestMinutes,
     totalExcursionMinutes: stats.totalMinutes,
     mkt: check.mkt,
@@ -111,6 +119,7 @@ function updateRoom(data, id, payload) {
   const room = data.rooms.find((r) => r.id === id);
   if (!room) throw new AppError(404, 'ROOM_NOT_FOUND', '这个冷库或者车厢不存在');
   validateRoom(payload, room);
+  const statusBefore = room.status;
   const merged = Object.assign({}, room, payload);
   Object.assign(room, {
     name: String(merged.name).trim(),
@@ -120,7 +129,22 @@ function updateRoom(data, id, payload) {
     status: merged.status,
     remark: String(merged.remark || ''),
   });
-  return decorateRoom(data, room);
+  const statusChanged = statusBefore !== room.status;
+  // 概览与统计里的在办批次、放行口径都是按冷库状态实时分组的，
+  // 这里把受影响的批次数与在办数一并返回，让改动“有下文”可核对。
+  const roomBatches = data.batches.filter((b) => b.roomId === id);
+  const impact = {
+    statusBefore,
+    statusAfter: room.status,
+    batchCount: roomBatches.length,
+    openBatchCount: roomBatches.filter((b) => b.status === '在库' || b.status === '待放行').length,
+    batches: roomBatches.map((b) => ({
+      batchId: b.id, code: b.code, product: b.product, status: b.status,
+      open: b.status === '在库' || b.status === '待放行',
+      pass: coldlib.releaseCheck(data, b).pass,
+    })),
+  };
+  return Object.assign(decorateRoom(data, room), { statusChanged, impact });
 }
 
 function removeRoom(data, id) {
@@ -170,6 +194,20 @@ function updateProbe(data, id, payload) {
   if (!probe) throw new AppError(404, 'PROBE_NOT_FOUND', '这个探头不存在');
   validateProbe(data, payload, probe);
   const merged = Object.assign({}, probe, payload);
+  const statusBefore = probe.status;
+
+  // 状态一变要有下文：改状态前先把涉及批次的判定快照存下来，改完重算做对照。
+  // 历史放行单（releases）原样保留，绝不回写——对照只反映“此刻重新判定”的结论。
+  const impactedBatchIds = {};
+  for (const r of data.records) {
+    if (r.probeId === id) impactedBatchIds[r.batchId] = true;
+  }
+  const before = {};
+  for (const batchId of Object.keys(impactedBatchIds)) {
+    const b = data.batches.find((x) => x.id === batchId);
+    if (b) before[batchId] = coldlib.checkSnapshot(data, b);
+  }
+
   Object.assign(probe, {
     roomId: merged.roomId,
     position: String(merged.position || '').trim(),
@@ -177,7 +215,53 @@ function updateProbe(data, id, payload) {
     calibratedUntil: String(merged.calibratedUntil),
     remark: String(merged.remark || ''),
   });
-  return decorateProbe(data, probe);
+
+  const recompute = [];
+  for (const batchId of Object.keys(before)) {
+    const b = data.batches.find((x) => x.id === batchId);
+    if (!b) continue;
+    const after = coldlib.checkSnapshot(data, b);
+    const oldSnap = before[batchId];
+    recompute.push({
+      batchId: b.id,
+      code: b.code,
+      product: b.product,
+      roomCode: roomCode(data, b.roomId),
+      batchStatus: b.status,
+      decided: data.releases.some((rl) => rl.batchId === b.id),
+      before: oldSnap,
+      after,
+      conclusionChanged: oldSnap.pass !== after.pass,
+      changedReasons: diffCheckReasons(oldSnap, after),
+    });
+  }
+  recompute.sort((a, b) => (a.code < b.code ? -1 : 1));
+  return Object.assign(decorateProbe(data, probe), {
+    statusChanged: statusBefore !== probe.status,
+    statusBefore,
+    recompute: {
+      reason: statusBefore !== probe.status ? 'probe-status' : 'probe-edit',
+      affectedBatchCount: recompute.length,
+      conclusionChangedCount: recompute.filter((x) => x.conclusionChanged).length,
+      batches: recompute,
+    },
+  });
+}
+
+// 对照里除了“满足/不满足”翻转，还要点名是哪几条口径翻转、记录数怎么变的
+function diffCheckReasons(before, after) {
+  const reasons = [];
+  if (before.pass !== after.pass) reasons.push(after.pass ? '结论由不满足变为满足' : '结论由满足变为不满足');
+  const beforeFailed = before.failed.join(',') || '';
+  const afterFailed = after.failed.join(',') || '';
+  if (beforeFailed !== afterFailed) reasons.push('不满足口径：[' + beforeFailed + '] → [' + afterFailed + ']');
+  if (before.recordCount !== after.recordCount) reasons.push('参与判定记录：' + before.recordCount + ' → ' + after.recordCount + ' 条');
+  if (before.excludedRecordCount !== after.excludedRecordCount) reasons.push('剔除记录：' + before.excludedRecordCount + ' → ' + after.excludedRecordCount + ' 条');
+  if (before.longestMinutes !== after.longestMinutes) reasons.push('最长超限：' + before.longestMinutes + ' → ' + after.longestMinutes + ' 分钟');
+  if (before.totalMinutes !== after.totalMinutes) reasons.push('累计超限：' + before.totalMinutes + ' → ' + after.totalMinutes + ' 分钟');
+  if (before.chainGapCount !== after.chainGapCount) reasons.push('断链数：' + before.chainGapCount + ' → ' + after.chainGapCount);
+  if (before.mkt !== after.mkt) reasons.push('MKT：' + before.mkt + ' → ' + after.mkt);
+  return reasons;
 }
 
 function removeProbe(data, id) {
@@ -194,6 +278,12 @@ function listBatches(data, query) {
   let rows = data.batches.slice();
   if (q.roomId) rows = rows.filter((b) => b.roomId === q.roomId);
   if (q.status) rows = rows.filter((b) => b.status === q.status);
+  if (q.roomStatus) {
+    rows = rows.filter((b) => {
+      const room = data.rooms.find((r) => r.id === b.roomId);
+      return room && room.status === q.roomStatus;
+    });
+  }
   if (q.product) rows = rows.filter((b) => String(b.product || '').includes(q.product));
   const decorated = rows.map((b) => decorateBatch(data, b));
   return decorated.sort((a, b) => (a.loadedAt < b.loadedAt ? 1 : -1));
@@ -202,15 +292,24 @@ function listBatches(data, query) {
 function batchDetail(data, id) {
   const batch = data.batches.find((b) => b.id === id);
   if (!batch) throw new AppError(404, 'BATCH_NOT_FOUND', '这个批次不存在');
-  const rows = coldlib.recordsOfBatch(data, id).map((r) => Object.assign({}, r, {
-    probeCode: probeCode(data, r.probeId),
-    probeExpired: !coldlib.probeValidOn(coldlib.probeOf(data, r.probeId), String(r.at).slice(0, 10)),
-  }));
+  const participation = coldlib.recordParticipation(data, id);
+  const rows = coldlib.recordsOfBatch(data, id).map((r) => {
+    const probe = coldlib.probeOf(data, r.probeId);
+    const part = participation[r.id] || { participates: true, reason: '' };
+    return Object.assign({}, r, {
+      probeCode: probeCode(data, r.probeId),
+      probeStatus: probe ? probe.status : '',
+      probeExpired: !coldlib.probeValidOn(probe, String(r.at).slice(0, 10)),
+      participates: part.participates,
+      excludeReason: part.reason,
+    });
+  });
   return Object.assign({}, decorateBatch(data, batch), {
     records: rows,
     effectiveRecords: coldlib.effectiveRecords(data, id).map((r) => Object.assign({}, r, { probeCode: probeCode(data, r.probeId) })),
     segments: coldlib.excursionStats(data, id).segments,
     chainGaps: coldlib.chainGaps(data, id).gaps,
+    excludedProbes: coldlib.excludedProbesOfBatch(data, id),
     releases: data.releases.filter((r) => r.batchId === id).slice().sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1)),
   });
 }
@@ -284,11 +383,20 @@ function listRecords(data, query) {
   if (q.from) rows = rows.filter((r) => r.at >= q.from);
   if (q.to) rows = rows.filter((r) => r.at <= q.to);
   return rows
-    .map((r) => Object.assign({}, r, {
-      batchCode: batchCode(data, r.batchId),
-      probeCode: probeCode(data, r.probeId),
-      outOfRange: Number(r.temperatureC) > Number(data.settings.upperLimitC) || Number(r.temperatureC) < Number(data.settings.lowerLimitC),
-    }))
+    .map((r) => {
+      const probe = data.probes.find((p) => p.id === r.probeId) || null;
+      const participates = coldlib.probeParticipates(probe);
+      return { row: Object.assign({}, r, {
+        batchCode: batchCode(data, r.batchId),
+        probeCode: probeCode(data, r.probeId),
+        probeStatus: probe ? probe.status : '',
+        participates,
+        outOfRange: Number(r.temperatureC) > Number(data.settings.upperLimitC) || Number(r.temperatureC) < Number(data.settings.lowerLimitC),
+      }), participates };
+    })
+    .filter((x) => (q.probeStatus ? x.row.probeStatus === q.probeStatus : true))
+    .filter((x) => (q.participates === '1' ? x.participates : q.participates === '0' ? !x.participates : true))
+    .map((x) => x.row)
     .sort((a, b) => (a.at < b.at ? 1 : -1));
 }
 
@@ -359,6 +467,8 @@ function decide(data, batchId, payload) {
     longestExcursionMinutes: check.longestMinutes,
     totalExcursionMinutes: check.totalMinutes,
     chainGapCount: check.chain.gapCount,
+    recordCount: check.recordCount,
+    excludedProbeCodes: check.excludedProbes.map((p) => p.probeCode),
     basis: String(payload.basis || '').trim(),
     remark: String(payload.remark || ''),
   };

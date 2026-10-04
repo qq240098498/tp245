@@ -16,11 +16,23 @@ function probeOf(data, probeId) {
   return data.probes.find((p) => p.id === probeId) || null;
 }
 
-// 同一探头同一时刻既有自动记录又有手工更正时，以手工为准
-function effectiveRecords(data, batchId) {
+function roomOf(data, roomId) {
+  return data.rooms.find((r) => r.id === roomId) || null;
+}
+
+// 停用探头名下的记录不参与判定；探头被删除的历史记录同样不参与
+function probeParticipates(probe) {
+  return !!probe && probe.status !== '停用';
+}
+
+// 同一探头同一时刻既有自动记录又有手工更正时，以手工为准。
+// 返回 { rows, excluded }：rows 为去重且剔除停用探头之后参与判定的记录；
+// excluded 为被去重/被剔除的原始记录，带原因，仅供页面“可查”展示，不进任何统计。
+function resolveRecords(data, batchId) {
   const rows = recordsOfBatch(data, batchId);
   const picked = {};
   const order = [];
+  const excluded = {};
   for (const row of rows) {
     const key = row.probeId + '|' + row.at;
     if (picked[key] === undefined) {
@@ -29,9 +41,68 @@ function effectiveRecords(data, batchId) {
       continue;
     }
     const current = picked[key];
-    if (current.source === '人工' && row.source === '自动') picked[key] = row;
+    if (current.source === '自动' && row.source === '人工') {
+      excluded[current.id] = { reason: 'manual', byRecordId: row.id };
+      picked[key] = row;
+    } else {
+      excluded[row.id] = { reason: 'manual', byRecordId: current.id };
+    }
   }
-  return order.map((key) => picked[key]);
+  const deduped = order.map((key) => picked[key]);
+  const active = [];
+  for (const row of deduped) {
+    const probe = probeOf(data, row.probeId);
+    if (probeParticipates(probe)) {
+      active.push(row);
+    } else {
+      excluded[row.id] = {
+        reason: 'disabled',
+        probeId: row.probeId,
+        probeCode: probe ? probe.code : '(探头已删除)',
+        probeStatus: probe ? probe.status : '停用',
+      };
+    }
+  }
+  return { rows: active, excluded, rawCount: rows.length, dedupedCount: deduped.length };
+}
+
+// 同一探头同一时刻既有自动记录又有手工更正时，以手工为准；停用探头记录剔除
+function effectiveRecords(data, batchId) {
+  return resolveRecords(data, batchId).rows;
+}
+
+// 每条原始记录是否参与判定及原因，供批次详情标注
+function recordParticipation(data, batchId) {
+  const resolved = resolveRecords(data, batchId);
+  const map = {};
+  for (const row of recordsOfBatch(data, batchId)) {
+    const info = resolved.excluded[row.id];
+    const probe = probeOf(data, row.probeId);
+    map[row.id] = info
+      ? { participates: false, reason: info.reason, probeStatus: probe ? probe.status : '', probeCode: probe ? probe.code : '' }
+      : { participates: true, reason: '', probeStatus: probe ? probe.status : '', probeCode: probe ? probe.code : '' };
+  }
+  return map;
+}
+
+// 被停用探头剔除的记录按探头汇总：判定条目里要写明因为哪台探头被剔掉
+function excludedProbesOfBatch(data, batchId) {
+  const resolved = resolveRecords(data, batchId);
+  const groups = {};
+  const order = [];
+  for (const row of recordsOfBatch(data, batchId)) {
+    const info = resolved.excluded[row.id];
+    if (!info || info.reason !== 'disabled') continue;
+    if (!groups[row.probeId]) {
+      groups[row.probeId] = { probeId: row.probeId, probeCode: info.probeCode, probeStatus: info.probeStatus, recordCount: 0, firstAt: row.at, lastAt: row.at };
+      order.push(row.probeId);
+    }
+    const g = groups[row.probeId];
+    g.recordCount += 1;
+    if (row.at < g.firstAt) g.firstAt = row.at;
+    if (row.at > g.lastAt) g.lastAt = row.at;
+  }
+  return order.map((id) => groups[id]);
 }
 
 // 超限：连续超出上下限的时段，回到范围内即断开
@@ -73,7 +144,7 @@ function excursionStats(data, batchId) {
   });
 }
 
-// 断链：相邻记录的时刻差超过门槛
+// 断链：相邻记录的时刻差超过门槛（停用探头记录剔除后，剩余记录之间照常判链）
 function chainGaps(data, batchId) {
   const settings = data.settings;
   const rows = effectiveRecords(data, batchId);
@@ -130,37 +201,71 @@ function monthlyExcursionMinutes(data, batchId) {
   return segmentStats(scoped, data.settings).totalMinutes;
 }
 
-// 放行判定：最长超限、累计超限、断链、探头校准四条
+// 放行判定：最长超限、累计超限、断链、探头校准四条；
+// 停用探头名下记录先剔除（excludedProbes 里写明探头与条数）；一条参与判定的记录都没有不能放行。
 function releaseCheck(data, batch) {
   const settings = data.settings;
   const stats = excursionStats(data, batch.id);
   const chain = chainGaps(data, batch.id);
   const accumulated = monthlyExcursionMinutes(data, batch.id);
   const expired = expiredProbes(data, batch.id, batch.loadedAt ? String(batch.loadedAt).slice(0, 10) : '');
+  const excludedProbes = excludedProbesOfBatch(data, batch.id);
+  const excludedRecordCount = excludedProbes.reduce((acc, p) => acc + p.recordCount, 0);
+  const room = roomOf(data, batch.roomId);
   const conditions = [
     { key: 'longest', ok: stats.longestMinutes <= Number(settings.allowExcursionMinutes), value: stats.longestMinutes, limit: Number(settings.allowExcursionMinutes), text: '单次连续超限不超过 ' + settings.allowExcursionMinutes + ' 分钟' },
     { key: 'total', ok: accumulated <= Number(settings.allowTotalExcursionMinutes), value: accumulated, limit: Number(settings.allowTotalExcursionMinutes), text: '累计超限不超过 ' + settings.allowTotalExcursionMinutes + ' 分钟' },
     { key: 'chain', ok: chain.gapCount === 0, value: chain.gapCount, limit: 0, text: '全程没有断链' },
+    { key: 'records', ok: stats.recordCount > 0, value: stats.recordCount, limit: 1, text: '有参与判定的温度记录（停用探头记录已剔除 ' + excludedRecordCount + ' 条）' },
   ];
   return {
     mkt: mktCelsius(data, batch.id),
     longestMinutes: stats.longestMinutes,
     totalMinutes: stats.totalMinutes,
     recordCount: stats.recordCount,
+    rawRecordCount: resolvedRawCount(data, batch.id),
+    excludedRecordCount,
+    excludedProbes,
     firstAt: stats.firstAt,
     lastAt: stats.lastAt,
     chain,
     expiredProbes: expired,
+    roomStatus: room ? room.status : '',
     conditions,
     pass: conditions.every((c) => c.ok),
     failed: conditions.filter((c) => !c.ok).map((c) => c.key),
   };
 }
 
+function resolvedRawCount(data, batchId) {
+  return data.records.filter((r) => r.batchId === batchId).length;
+}
+
+// 判定快照：状态变更前后各算一次，用来给出“哪些批次结论变了”的对照
+function checkSnapshot(data, batch) {
+  const c = releaseCheck(data, batch);
+  return {
+    pass: c.pass,
+    failed: c.failed.slice(),
+    mkt: c.mkt,
+    longestMinutes: c.longestMinutes,
+    totalMinutes: c.totalMinutes,
+    chainGapCount: c.chain.gapCount,
+    recordCount: c.recordCount,
+    excludedRecordCount: c.excludedRecordCount,
+    excludedProbeCodes: c.excludedProbes.map((p) => p.probeCode),
+  };
+}
+
 module.exports = {
   toDate,
   probeOf,
+  roomOf,
+  probeParticipates,
   recordsOfBatch,
+  resolveRecords,
+  recordParticipation,
+  excludedProbesOfBatch,
   effectiveRecords,
   excursionStats,
   chainGaps,
@@ -170,4 +275,5 @@ module.exports = {
   accumulatedExcursionMinutes,
   monthlyExcursionMinutes,
   releaseCheck,
+  checkSnapshot,
 };

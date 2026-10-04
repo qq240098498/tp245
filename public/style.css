@@ -227,7 +227,47 @@ tr.row-detail > td { background: #f7fbfc; border-bottom: 1px solid var(--line); 
 .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); background: #fff; }
 .pill-ok { color: var(--ok); border-color: #a9d8c4; background: var(--ok-soft); }
 .pill-bad { color: var(--accent); border-color: #f3b7b0; background: var(--accent-soft); }
+.pill-warn { color: #b47b18; border-color: #eccf94; background: #fdf4e2; }
+.pill-off { color: var(--ink-soft); border-color: #c3ccd0; background: #eef1f2; }
 .pill-mute { color: var(--ink-soft); }
+
+.cell-sub { color: var(--ink-soft); font-size: 11px; margin-top: 2px; }
+.mini-warn { color: #b47b18; font-size: 11px; }
+
+/* 冷库/批次状态行底色：检修暖黄、停用灰、停用探头记录灰 */
+.row-room-检修 td, .row-batch-maintenance td { background: #fdf6e7; }
+.row-room-检修:hover td, .row-batch-maintenance:hover td { background: #f9eccf; }
+.row-room-停用 td, .row-batch-stopped td, tr.row-disabled td, tr.row-excluded td { background: #f1f3f4; }
+.row-room-停用:hover td, .row-batch-stopped:hover td, tr.row-disabled:hover td, tr.row-excluded:hover td { background: #e6eaec; }
+tr.row-muted td { color: var(--ink-soft); }
+
+.room-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  vertical-align: 1px;
+}
+.room-tag-检修 { color: #b47b18; background: #fdf4e2; border: 1px solid #eccf94; }
+.room-tag-停用 { color: var(--ink-soft); background: #eef1f2; border: 1px solid #c3ccd0; }
+
+.room-banner-检修 { color: #b47b18; background: #fdf4e2; border: 1px solid #eccf94; padding: 6px 8px; border-radius: 4px; }
+.room-banner-停用 { color: var(--ink-soft); background: #eef1f2; border: 1px solid #c3ccd0; padding: 6px 8px; border-radius: 4px; }
+
+/* 状态变更对照弹层 */
+.impact-head {
+  background: var(--primary-soft);
+  border: 1px solid #c6e0e9;
+  border-radius: 5px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  line-height: 1.7;
+}
+.impact-table { margin-top: 6px; }
+.impact-table td { white-space: normal; vertical-align: top; }
+.reason-list { margin: 0; padding-left: 16px; color: var(--ink-soft); font-size: 12px; }
+.reason-list li { margin-bottom: 2px; }
 
 .cond-list { list-style: none; margin: 0; padding: 0; }
 .cond-list li { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--line-soft); }
@@ -282,6 +322,8 @@ tr.row-detail > td { background: #f7fbfc; border-bottom: 1px solid var(--line); 
   box-shadow: 0 18px 48px rgba(0,0,0,0.28);
   overflow: hidden;
 }
+
+.modal.modal-wide { width: 880px; }
 
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
